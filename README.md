@@ -71,17 +71,17 @@ Subsequent Requests: File Exists (Served by Web Server)
 
 ## Installation
 
-### Method 1: Direct Upload
+### Method 1: ZIP Install
+
+1. Download the latest ZIP package from the releases page
+2. WordPress Admin > Plugins > Add New > Upload Plugin
+3. Activate the plugin
+
+### Method 2: Direct Upload
 
 1. Download the `elementor-css-regenerator` folder
 2. Upload to `/wp-content/plugins/`
 3. Activate via WordPress Admin > Plugins
-
-### Method 2: ZIP Install
-
-1. Zip the `elementor-css-regenerator` folder
-2. WordPress Admin > Plugins > Add New > Upload Plugin
-3. Activate the plugin
 
 ## Requirements
 
