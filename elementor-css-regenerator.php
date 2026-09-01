@@ -3,13 +3,14 @@
  * Plugin Name: Elementor CSS Regenerator
  * Plugin URI: https://robertwent.com
  * Description: Automatically regenerates and serves missing Elementor CSS files on-demand when they're requested from cached pages. Prevents broken styling after Elementor updates clear CSS cache.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Robert Went
  * Author URI: https://robertwent.com
  * License: GPL v2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Requires at least: 5.0
  * Requires PHP: 7.4
+ * Update URI: https://github.com/robwent/elementor-css-regenerator
  */
 
 // Exit if accessed directly
@@ -263,5 +264,199 @@ class Elementor_CSS_Regenerator {
 	}
 }
 
+/**
+ * Self-hosted plugin updates off public GitHub releases — the plugin is not
+ * distributed through wordpress.org. The Update URI header above opts out of
+ * wordpress.org update checks entirely and routes this plugin through the
+ * update_plugins_github.com filter, where we feed core the latest release;
+ * core compares versions and runs its normal update UX.
+ *
+ * The release contract: a published (non-draft, non-prerelease) GitHub
+ * release whose tag is the plugin version (optionally v-prefixed) carrying
+ * an asset named elementor-css-regenerator-{version}.zip — exactly what
+ * bin/build.sh emits.
+ */
+class Elementor_CSS_Regenerator_Updater {
+
+	const REPO = 'robwent/elementor-css-regenerator';
+	const SLUG = 'elementor-css-regenerator';
+
+	const TRANSIENT   = 'ecr_latest_release';
+	const CACHE_TTL   = 12 * HOUR_IN_SECONDS;
+	const FAILURE_TTL = HOUR_IN_SECONDS;
+
+	/**
+	 * Hook into core's update pipeline.
+	 */
+	public function register() {
+		// Hostname-scoped, so every github.com-updated plugin on the site
+		// shares this filter — the basename check keeps us to our own row.
+		add_filter( 'update_plugins_github.com', array( $this, 'filter_update' ), 10, 3 );
+		add_filter( 'plugins_api', array( $this, 'filter_plugins_api' ), 10, 3 );
+	}
+
+	/**
+	 * The array shape core expects from update_plugins_{hostname}: it
+	 * version_compares 'version' against the installed plugin itself, so
+	 * returning the current release when no update is due is correct.
+	 *
+	 * @param array|false $update      Existing update data.
+	 * @param array       $plugin_data Parsed plugin headers.
+	 * @param string      $plugin_file Plugin basename being checked.
+	 * @return array|false
+	 */
+	public function filter_update( $update, $plugin_data, $plugin_file ) {
+		if ( plugin_basename( __FILE__ ) !== $plugin_file ) {
+			return $update;
+		}
+
+		$release = $this->latest_release();
+
+		if ( null === $release ) {
+			return $update;
+		}
+
+		return array(
+			'id'           => 'https://github.com/' . self::REPO,
+			'slug'         => self::SLUG,
+			'plugin'       => plugin_basename( __FILE__ ),
+			'version'      => $release['version'],
+			'url'          => $release['url'],
+			'package'      => $release['package'],
+			'requires'     => '5.0',
+			'requires_php' => '7.4',
+		);
+	}
+
+	/**
+	 * Backs the "View details" modal on the Plugins screen.
+	 *
+	 * @param object|false $result Existing result.
+	 * @param string       $action API action.
+	 * @param object       $args   Request arguments.
+	 * @return object|false
+	 */
+	public function filter_plugins_api( $result, $action, $args ) {
+		if ( 'plugin_information' !== $action || self::SLUG !== ( $args->slug ?? null ) ) {
+			return $result;
+		}
+
+		$release = $this->latest_release();
+
+		if ( null === $release ) {
+			return $result;
+		}
+
+		return (object) array(
+			'name'          => 'Elementor CSS Regenerator',
+			'slug'          => self::SLUG,
+			'version'       => $release['version'],
+			'author'        => '<a href="https://robertwent.com">Robert Went</a>',
+			'homepage'      => 'https://github.com/' . self::REPO,
+			'requires'      => '5.0',
+			'requires_php'  => '7.4',
+			'download_link' => $release['package'],
+			'last_updated'  => $release['published_at'],
+			'sections'      => array(
+				'description' => '<p>' . esc_html__( 'Automatically regenerates and serves missing Elementor CSS files on-demand when they are requested from cached pages.', 'elementor-css-regenerator' ) . '</p>',
+				'changelog'   => wp_kses_post( wpautop( $release['notes'] ) ),
+			),
+		);
+	}
+
+	/**
+	 * Latest published release, cached so update checks (twice-daily cron
+	 * plus every Plugins-screen load) stay far inside GitHub's 60/hour
+	 * unauthenticated API allowance. Failures cache shorter, as a miss.
+	 *
+	 * @return array|null
+	 */
+	private function latest_release() {
+		$cached = get_transient( self::TRANSIENT );
+
+		if ( 'miss' === $cached ) {
+			return null;
+		}
+
+		if ( is_array( $cached ) ) {
+			return $cached;
+		}
+
+		$response = wp_remote_get(
+			'https://api.github.com/repos/' . self::REPO . '/releases/latest',
+			array(
+				'timeout' => 15,
+				'headers' => array( 'Accept' => 'application/vnd.github+json' ),
+			)
+		);
+
+		$release = null;
+
+		if ( ! is_wp_error( $response ) && 200 === wp_remote_retrieve_response_code( $response ) ) {
+			$body    = json_decode( wp_remote_retrieve_body( $response ), true );
+			$release = is_array( $body ) ? self::release_to_update( $body ) : null;
+		}
+
+		if ( null === $release ) {
+			set_transient( self::TRANSIENT, 'miss', self::FAILURE_TTL );
+
+			return null;
+		}
+
+		set_transient( self::TRANSIENT, $release, self::CACHE_TTL );
+
+		return $release;
+	}
+
+	/**
+	 * Pure release-payload parsing.
+	 *
+	 * @param array $release Decoded GitHub release object.
+	 * @return array|null
+	 */
+	public static function release_to_update( array $release ) {
+		if ( ! empty( $release['draft'] ) || ! empty( $release['prerelease'] ) ) {
+			return null;
+		}
+
+		$tag = $release['tag_name'] ?? null;
+
+		if ( ! is_string( $tag ) || '' === $tag ) {
+			return null;
+		}
+
+		$version = ltrim( $tag, 'v' );
+
+		if ( 1 !== preg_match( '/^\d+\.\d+\.\d+/', $version ) ) {
+			return null;
+		}
+
+		$asset_name = self::SLUG . '-' . $version . '.zip';
+		$package    = null;
+
+		foreach ( (array) ( $release['assets'] ?? array() ) as $asset ) {
+			if ( is_array( $asset ) && $asset_name === ( $asset['name'] ?? null ) && is_string( $asset['browser_download_url'] ?? null ) ) {
+				$package = $asset['browser_download_url'];
+				break;
+			}
+		}
+
+		// A release without its build asset is a broken release — advertising
+		// it would send core after a package that 404s. Treat as no release.
+		if ( null === $package ) {
+			return null;
+		}
+
+		return array(
+			'version'      => $version,
+			'package'      => $package,
+			'url'          => is_string( $release['html_url'] ?? null ) ? $release['html_url'] : 'https://github.com/' . self::REPO . '/releases',
+			'notes'        => is_string( $release['body'] ?? null ) ? $release['body'] : '',
+			'published_at' => is_string( $release['published_at'] ?? null ) ? $release['published_at'] : '',
+		);
+	}
+}
+
 // Initialize the plugin
 new Elementor_CSS_Regenerator();
+( new Elementor_CSS_Regenerator_Updater() )->register();
